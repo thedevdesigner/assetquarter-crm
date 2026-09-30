@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, BookmarkCheck, Settings, LucideIcon } from "lucide-react";
+import { LayoutDashboard, Users, BarChart3, LucideIcon } from "lucide-react";
 
 interface NavItem {
   name: string;
@@ -12,22 +12,20 @@ interface NavItem {
 
 // Easily add, remove, or reorder navigation links here in the future
 const NAV_ITEMS: NavItem[] = [
-  {
+{
     name: "Dashboard",
     href: "/dashboard",
     icon: LayoutDashboard,
-  },
-  {
+},
+{
     name: "Follow-ups",
     href: "/dashboard/follow-ups",
     icon: Users,
-  },
-  // Example of how easy it is to add a new item later:
-  // {
-  //   name: "Saved Properties",
-  //   href: "/dashboard/saved",
-  //   icon: BookmarkCheck,
-  // },
+},
+{ name: "Performance",
+  href: "/dashboard/performance",
+  icon: BarChart3 
+}
 ];
 
 export default function DashboardLayout({
