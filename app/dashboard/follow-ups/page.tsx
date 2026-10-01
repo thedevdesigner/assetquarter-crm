@@ -1,27 +1,24 @@
 "use client";
 
-import { useState, useEffect } from "react";
-import Link from "next/link";
+import { useState, useEffect, useCallback } from "react";
 import { 
   Phone, 
-  ArrowLeft, 
   Calendar, 
   MapPin, 
   ExternalLink, 
-  CheckCircle2, 
   Clock, 
-  XCircle, 
-  AlertCircle, 
   Trash2, 
   Plus, 
   Minus, 
-  Filter,
-  Building2
+  Building2,
+  RefreshCw,
+  CheckCircle2,
+  AlertCircle,
+  Info
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
 
 interface FollowUpItem {
-  id: string; // Unique identifier or phone number key
+  id: string; // Clean UUID key
   title: string;
   price: string;
   location: string;
@@ -34,40 +31,170 @@ interface FollowUpItem {
   notes: string;
 }
 
+// ==========================================
+// [SECTION: NOTIFICATION SYSTEM TYPES]
+// ==========================================
+interface Notification {
+  id: number;
+  type: "success" | "info" | "error";
+  message: string;
+}
+
+const API_BASE = `${process.env.NEXT_PUBLIC_API_URL}/api/v1/followups`;
+const STORAGE_KEY = "property_followups";
+
 export default function FollowUpsPage() {
   const [followUps, setFollowUps] = useState<FollowUpItem[]>([]);
   const [filterStatus, setFilterStatus] = useState<string>("all");
   const [filterTime, setFilterTime] = useState<string>("all");
   const [searchTerm, setSearchTerm] = useState<string>("");
+  const [isSyncing, setIsSyncing] = useState<boolean>(false);
+  const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Load follow-ups from localStorage on mount
+  // ==========================================
+  // [SECTION: NOTIFICATION SYSTEM STATE & LOGIC]
+  // ==========================================
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+
+  const addNotification = (type: "success" | "info" | "error", message: string) => {
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, type, message }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 4000);
+  };
+  // ==========================================
+
+  // Synchronize React state and LocalStorage in one step
+  const updateLocalAndState = useCallback((newList: FollowUpItem[]) => {
+    setFollowUps(newList);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(newList));
+  }, []);
+
+  // Mount Phase: Hydrate from LocalStorage instantly, then sync with Turso DB
   useEffect(() => {
-    const saved = localStorage.getItem("property_followups");
+    let cachedData: FollowUpItem[] = [];
+    const saved = localStorage.getItem(STORAGE_KEY);
     if (saved) {
       try {
-        setFollowUps(JSON.parse(saved));
+        cachedData = JSON.parse(saved);
+        setFollowUps(cachedData);
       } catch (e) {
         console.error("Failed to parse follow-ups storage:", e);
       }
     }
-  }, []);
 
-  // Save changes to localStorage
-  const saveToStorage = (updatedList: FollowUpItem[]) => {
-    setFollowUps(updatedList);
-    localStorage.setItem("property_followups", JSON.stringify(updatedList));
+    const fetchFromDatabase = async () => {
+      try {
+        setIsLoading(cachedData.length === 0);
+        setIsSyncing(true);
+
+        const response = await fetch(API_BASE);
+        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+
+        const result = await response.json();
+        if (result.success && Array.isArray(result.data)) {
+          updateLocalAndState(result.data);
+        }
+      } catch (error) {
+        console.warn("Background DB fetch failed; maintaining local storage cache:", error);
+      } finally {
+        setIsLoading(false);
+        setIsSyncing(false);
+      }
+    };
+
+    fetchFromDatabase();
+  }, [updateLocalAndState]);
+
+  // 1. Delete Handler
+  const handleDelete = async (id: string, title: string) => {
+    const updated = followUps.filter((item) => item.id !== id);
+    updateLocalAndState(updated);
+    
+    addNotification("info", `Removed "${title || "Property"}" from follow-ups.`);
+
+    try {
+      await fetch(`${API_BASE}/${id}`, { method: "DELETE" });
+    } catch (err) {
+      console.warn("Delete DB sync failed:", err);
+    }
   };
 
-  // Update specific follow-up property fields
-  const updateFollowUp = (id: string, updates: Partial<FollowUpItem>) => {
-    const updated = followUps.map(item => item.id === id ? { ...item, ...updates } : item);
-    saveToStorage(updated);
+  // 2. Status Handler
+  const handleStatusChange = async (id: string, newStatusStr: string) => {
+    const newStatus = newStatusStr as FollowUpItem["status"];
+    const updated = followUps.map((item) =>
+      item.id === id ? { ...item, status: newStatus } : item
+    );
+    updateLocalAndState(updated);
+
+    addNotification("info", `Updated status to "${newStatus.toUpperCase()}".`);
+
+    try {
+      await fetch(`${API_BASE}/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: newStatus }),
+      });
+    } catch (err) {
+      console.warn("Status DB sync failed:", err);
+    }
   };
 
-  // Delete item from follow-ups
-  const removeItem = (id: string) => {
-    const updated = followUps.filter(item => item.id !== id);
-    saveToStorage(updated);
+  // 3. Contact Attempts Counter Handler (Bounded 0 to 3)
+  const handleAttemptsChange = async (id: string, newAttempts: number) => {
+    const boundedAttempts = Math.min(Math.max(newAttempts, 0), 3);
+    const updated = followUps.map((item) =>
+      item.id === id ? { ...item, attempts: boundedAttempts } : item
+    );
+    updateLocalAndState(updated);
+
+    addNotification("info", `Follow-up attempts updated to ${boundedAttempts}/3.`);
+
+    try {
+      await fetch(`${API_BASE}/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ attempts: boundedAttempts }),
+      });
+    } catch (err) {
+      console.warn("Attempts DB sync failed:", err);
+    }
+  };
+
+  // 4. Local Notes Text Change
+  const handleNotesChange = (id: string, text: string) => {
+    setFollowUps((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, notes: text } : item))
+    );
+  };
+
+  // 5. Notes Blur Auto-Save Handler
+  const handleNotesBlur = async (id: string, notesText: string) => {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved) {
+      const parsed: FollowUpItem[] = JSON.parse(saved);
+      const existing = parsed.find((item) => item.id === id);
+      if (existing && existing.notes === notesText) return; // Skip if unchanged
+    }
+
+    const updated = followUps.map((item) =>
+      item.id === id ? { ...item, notes: notesText } : item
+    );
+    updateLocalAndState(updated);
+
+    addNotification("success", "Notes updated successfully.");
+
+    try {
+      await fetch(`${API_BASE}/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ notes: notesText }),
+      });
+    } catch (err) {
+      console.warn("Notes DB sync failed:", err);
+    }
   };
 
   // Time categorization helper
@@ -83,14 +210,10 @@ export default function FollowUpsPage() {
   };
 
   // Filter logic
-  const filteredItems = followUps.filter(item => {
-    // Status filter
+  const filteredItems = followUps.filter((item) => {
     if (filterStatus !== "all" && item.status !== filterStatus) return false;
-    
-    // Time filter
     if (filterTime !== "all" && getTimeCategory(item.dateAdded) !== filterTime) return false;
 
-    // Search query match (title, location, phone)
     if (searchTerm) {
       const query = searchTerm.toLowerCase();
       const matchTitle = item.title?.toLowerCase().includes(query);
@@ -105,12 +228,42 @@ export default function FollowUpsPage() {
   return (
     <div className="p-4 md:p-8 space-y-6 max-w-7xl mx-auto w-full min-h-screen flex flex-col bg-background relative">
       
-      {/* Top Navigation / Header */}
+      {/* ========================================== */}
+      {/* [SECTION: NOTIFICATION TOAST CONTAINER UI] */}
+      {/* ========================================== */}
+      <div className="fixed top-5 right-5 z-50 flex flex-col space-y-3 max-w-sm w-full pointer-events-none">
+        {notifications.map(n => {
+          let bgStyle = "bg-blue-600 text-white";
+          let IconComponent = Info;
+          if (n.type === "success") {
+            bgStyle = "bg-emerald-600 text-white";
+            IconComponent = CheckCircle2;
+          } else if (n.type === "error") {
+            bgStyle = "bg-rose-600 text-white";
+            IconComponent = AlertCircle;
+          }
+
+          return (
+            <div key={n.id} className={`pointer-events-auto flex items-start gap-3 p-4 rounded-xl shadow-lg ${bgStyle}`}>
+              <IconComponent className="h-5 w-5 flex-shrink-0 mt-0.5" />
+              <div className="flex-1 text-sm font-medium leading-tight">{n.message}</div>
+            </div>
+          );
+        })}
+      </div>
+      {/* ========================================== */}
+
+      {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-card p-6 rounded-2xl border shadow-sm">
         <div className="space-y-1">
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Follow-Up Pipeline CRM</h1>
+            {isSyncing && (
+              <span className="flex items-center gap-1 text-xs text-muted-foreground bg-muted px-2.5 py-1 rounded-full animate-pulse">
+                <RefreshCw className="h-3 w-3 animate-spin text-primary" /> Syncing...
+              </span>
+            )}
           </div>
-          <h1 className="text-2xl font-bold tracking-tight text-foreground pt-2">Follow-Up Pipeline CRM</h1>
           <p className="text-sm text-muted-foreground">Manage, track, and log communication stages with property listings</p>
         </div>
         <div className="flex items-center gap-2 bg-muted/50 p-3 rounded-xl border">
@@ -163,7 +316,12 @@ export default function FollowUpsPage() {
       </div>
 
       {/* Main Content Area */}
-      {filteredItems.length === 0 ? (
+      {isLoading ? (
+        <div className="h-[400px] rounded-2xl border border-dashed bg-card/50 flex flex-col items-center justify-center space-y-3 text-muted-foreground">
+          <RefreshCw className="h-8 w-8 animate-spin text-primary opacity-60" />
+          <p className="text-sm font-medium">Fetching follow-ups from Turso DB...</p>
+        </div>
+      ) : filteredItems.length === 0 ? (
         <div className="h-[400px] rounded-2xl border border-dashed bg-card/50 flex flex-col items-center justify-center space-y-3 text-muted-foreground">
           <Clock className="h-12 w-12 opacity-20" />
           <p className="text-base font-medium">No follow-up records found matching your filters.</p>
@@ -180,11 +338,11 @@ export default function FollowUpsPage() {
                 className="bg-card rounded-2xl border shadow-sm hover:shadow-md transition-shadow overflow-hidden flex flex-col md:flex-row"
               >
                 {/* Left Side: Thumbnail Preview */}
-                <div className="relative md:w-64 h-48 md:h-auto bg-zinc-950 flex-shrink-0 flex items-center justify-center">
+                <div className="relative w-full md:w-80 h-64 md:h-64 bg-zinc-950 flex-shrink-0 group overflow-hidden rounded-t-2xl md:rounded-l-2xl md:rounded-tr-none">
                   <img 
                     src={item.imageUrl || "https://images.unsplash.com/photo-1560448204-e02f11c3d0e2?auto=format&fit=crop&q=80&w=600"} 
                     alt={item.title} 
-                    className="w-full h-full object-contain"
+                    className="w-full h-full object-cover object-center"
                   />
                   <div className="absolute top-2 left-2">
                     <span className={`text-xs px-2.5 py-1 rounded-full font-semibold shadow-md uppercase tracking-wider ${
@@ -231,8 +389,8 @@ export default function FollowUpsPage() {
                         <span className="text-xs font-semibold text-muted-foreground">Status:</span>
                         <select 
                           value={item.status}
-                          onChange={(e) => updateFollowUp(item.id, { status: e.target.value as any })}
-                          className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border focus:outline-none ${
+                          onChange={(e) => handleStatusChange(item.id, e.target.value)}
+                          className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border focus:outline-none cursor-pointer ${
                             item.status === 'converted' ? 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/40' :
                             item.status === 'contacted' ? 'bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/40' :
                             item.status === 'rejected' ? 'bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-950/40' :
@@ -251,17 +409,19 @@ export default function FollowUpsPage() {
                         <span className="text-xs font-semibold text-muted-foreground">Follow-Up Attempts:</span>
                         <div className="flex items-center gap-1">
                           <button 
-                            onClick={() => updateFollowUp(item.id, { attempts: Math.max(0, item.attempts - 1) })}
-                            disabled={item.attempts <= 0}
-                            className="p-1 rounded hover:bg-background disabled:opacity-30"
+                            onClick={() => handleAttemptsChange(item.id, (item.attempts || 0) - 1)}
+                            disabled={(item.attempts || 0) <= 0}
+                            className="p-1 rounded hover:bg-background disabled:opacity-30 cursor-pointer"
+                            title="Decrease attempts"
                           >
                             <Minus className="h-3 w-3" />
                           </button>
-                          <span className="text-xs font-bold px-1.5">{item.attempts} / 3</span>
+                          <span className="text-xs font-bold px-1.5">{item.attempts || 0} / 3</span>
                           <button 
-                            onClick={() => updateFollowUp(item.id, { attempts: Math.min(3, item.attempts + 1) })}
-                            disabled={item.attempts >= 3}
-                            className="p-1 rounded hover:bg-background disabled:opacity-30"
+                            onClick={() => handleAttemptsChange(item.id, (item.attempts || 0) + 1)}
+                            disabled={(item.attempts || 0) >= 3}
+                            className="p-1 rounded hover:bg-background disabled:opacity-30 cursor-pointer"
+                            title="Increase attempts"
                           >
                             <Plus className="h-3 w-3" />
                           </button>
@@ -275,7 +435,8 @@ export default function FollowUpsPage() {
                         type="text" 
                         placeholder="Add quick CRM notes (e.g., Called at 2PM, left voicemail)..."
                         value={item.notes || ""}
-                        onChange={(e) => updateFollowUp(item.id, { notes: e.target.value })}
+                        onChange={(e) => handleNotesChange(item.id, e.target.value)}
+                        onBlur={(e) => handleNotesBlur(item.id, e.target.value)}
                         className="w-full h-9 px-3 text-xs rounded-lg border bg-background text-foreground focus:outline-none focus:ring-1 focus:ring-primary"
                       />
                     </div>
@@ -297,8 +458,8 @@ export default function FollowUpsPage() {
                     </div>
 
                     <button 
-                      onClick={() => removeItem(item.id)}
-                      className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 hover:text-rose-700 px-2.5 py-1.5 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors"
+                      onClick={() => handleDelete(item.id, item.title)}
+                      className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 hover:text-rose-700 px-2.5 py-1.5 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors cursor-pointer"
                     >
                       <Trash2 className="h-3.5 w-3.5" /> Remove
                     </button>

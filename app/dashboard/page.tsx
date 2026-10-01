@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState,useEffect } from "react";
 import { saveFollowUp } from "../../actions";
 import { 
   Phone, 
@@ -17,8 +17,13 @@ import {
   ExternalLink,
   UserPlus
 } from "lucide-react";
+import { 
+  getLocalFollowUps, 
+  setLocalFollowUps, 
+  normalizeToFollowUp, 
+  FollowUpItem 
+} from "@/lib/followups";
 import { Button } from "@/components/ui/button";
-import { useCallback } from "react";
 import { SourceToggle } from "@/components/explorer/SourceToggle";
 import { RightmoveAutocompletion, RightmovePayload } from "@/components/explorer/RightmoveAutocompletion";
 
@@ -29,6 +34,26 @@ interface Notification {
 }
 
 export default function DashboardPage() {
+
+  // Mandatory 10-second frontend cooldown state
+const [isCoolingDown, setIsCoolingDown] = useState<boolean>(false);
+const [cooldownSeconds, setCooldownSeconds] = useState<number>(0);
+
+/**
+ * 10-second client-side cooldown lock with second-by-second updates
+ */
+const startCooldownLock = async (durationInSeconds = 20) => {
+  setIsCoolingDown(true);
+  setCooldownSeconds(durationInSeconds);
+
+  for (let sec = durationInSeconds; sec > 0; sec--) {
+    setCooldownSeconds(sec);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+
+  setIsCoolingDown(false);
+  setCooldownSeconds(0);
+};
 
   const [source, setSource] = useState<"gumtree" | "rightmove">("gumtree");
   const [status, setStatus] = useState<"idle" | "loading" | "success" | "empty" | "error">("idle");
@@ -48,36 +73,160 @@ export default function DashboardPage() {
     }, 4000);
   };
 
-  const handleAddToFollowUp = async (property: any) => {
-    const phoneNum = property.phone || property.srpContactDetail?.replyPhone || property.customer?.contactTelephone;
-    const desc = property.shortDescription || property.summary;
-    const itemUrl = property.url || property.propertyUrl;
-    const imgUrl = property.imageUrl || (property.images && property.images[0]?.srcUrl);
+const handleAddToFollowUp = async (listing: any) => {
+  if (!listing) return;
 
-    const result = await saveFollowUp({
-      id: property.id || itemUrl,
-      title: property.title || property.displayAddress,
-      price: typeof property.price === "object" ? `${property.price?.amount} ${property.price?.frequency}` : property.price,
-      location: property.location || property.displayAddress,
-      description: desc,
-      phone: phoneNum,
-      imageUrl: imgUrl,
-      url: itemUrl,
-      status: "pending",
-      dateAdded: property.date || property.listingUpdate?.listingUpdateDate,
-    });
+  const sourceUrl = listing.url || listing.propertyUrl || "";
+  const existing: FollowUpItem[] = JSON.parse(localStorage.getItem("property_followups") || "[]");
 
-    if (result.success) {
-      addNotification("success", "Added to Turso Follow-Ups!");
-    } else {
-      addNotification("error", "Failed to save property.");
-    }
+  // Check duplicate by URL instead of ID
+  const isDuplicate = existing.some((item) => sourceUrl && item.url === sourceUrl);
+  if (isDuplicate) {
+    addNotification("info", "This listing is already in your follow-up pipeline.");
+    return;
+  }
+
+  const newItem: FollowUpItem = {
+    id: crypto.randomUUID(), // Clean UUID string
+    title: listing.title || listing.displayAddress || "Untitled Property",
+    price: typeof listing.price === "string" ? listing.price : "POA",
+    location: listing.location || listing.displayAddress || "UK",
+    phone: listing.phone || "",
+    url: sourceUrl,
+    imageUrl: listing.imageUrl || "",
+    status: "pending",
+    attempts: 0,
+    notes: "",
+    dateAdded: new Date().toISOString(),
   };
 
+  // Local Save + Sync
+  const updated = [newItem, ...existing];
+  localStorage.setItem("property_followups", JSON.stringify(updated));
+  addNotification("success", `Added "${newItem.title}" to follow-ups!`);
+
+  fetch(`${ process.env.NEXT_PUBLIC_API_URL}/api/v1/followups`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(newItem),
+  }).catch((err) => console.warn("DB Sync delayed:", err));
+};
+
+// LocalStorage Keys
+const GUMTREE_CACHE_KEY = "property_dashboard_gumtree_cache";
+const RIGHTMOVE_CACHE_KEY = "property_dashboard_rightmove_cache";
+
+// Inside DashboardPage component:
+
+// Hydrate state from localStorage whenever 'source' changes
+useEffect(() => {
+  const cacheKey = source === "gumtree" ? GUMTREE_CACHE_KEY : RIGHTMOVE_CACHE_KEY;
+  const savedCache = localStorage.getItem(cacheKey);
+
+  if (savedCache) {
+    try {
+      const parsed = JSON.parse(savedCache);
+      setListingData(parsed.listingData || []);
+      setCurrentPage(parsed.currentPage || 1);
+      setNumberOfPages(parsed.numberOfPages || 1);
+      setStatus(parsed.listingData?.length > 0 ? "success" : "idle");
+
+      // Restore Rightmove payload state if switching back to Rightmove
+      if (source === "rightmove" && parsed.activeRmPayload) {
+        setActiveRmPayload(parsed.activeRmPayload);
+      }
+    } catch (e) {
+      console.error("Failed to parse cached data:", e);
+    }
+  } else {
+    // Reset view gracefully if no cache exists for the selected source yet
+    setListingData([]);
+    setCurrentPage(1);
+    setNumberOfPages(1);
+    setStatus("idle");
+  }
+}, [source]);
 // Cache active rightmove payload for pagination controls
+// Inside page.tsx
+
+// Active Rightmove search cache in dashboard state
 const [activeRmPayload, setActiveRmPayload] = useState<RightmovePayload | null>(null);
 
-const fetchProperties = async (param: number | RightmovePayload) => {
+/**
+ * 1. GUMTREE FETCH LOGIC
+ * Endpoints: GET /api/v1/property/gumtree (Page 1) 
+ *            POST /api/v1/property/gumtree (Page > 1)
+ * Pagination: Step increment by 1 (1, 2, 3...)
+ */
+const fetchGumtreeProperties = async (page: number = 1) => {
+  if (isCoolingDown) {
+    addNotification("error", `Please wait ${cooldownSeconds} second(s) before making another request.`);
+    return;
+  }
+
+  const pageNum = typeof page === "number" ? page : 1;
+  const isPost = pageNum > 1;
+
+  setStatus("loading");
+  startCooldownLock(10);
+
+  try {
+    const apiUrl =  process.env.NEXT_PUBLIC_API_URL;
+    const endpoint = `${apiUrl}/api/v1/property/gumtree`;
+
+    const fetchOptions: RequestInit = isPost
+      ? {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ page: pageNum }),
+        }
+      : {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        };
+
+    const response = await fetch(endpoint, fetchOptions);
+    if (!response.ok) throw new Error(`Server status ${response.status}`);
+
+    const result = await response.json();
+    const innerData = result.data || {};
+    const properties = Array.isArray(innerData) ? innerData : innerData.data || [];
+    const pagination = result.pagination || innerData.pagination || {};
+
+    const totalPages = Number(pagination.numberOfPages || 1);
+    const activePage = Number(pagination.currentPage || pageNum);
+
+    setListingData(properties);
+    setCurrentPage(activePage);
+    setNumberOfPages(totalPages);
+    setStatus(properties.length > 0 ? "success" : "empty");
+
+    // SAVE TO GUMTREE CACHE
+    localStorage.setItem(
+      GUMTREE_CACHE_KEY,
+      JSON.stringify({
+        listingData: properties,
+        currentPage: activePage,
+        numberOfPages: totalPages,
+      })
+    );
+  } catch (error: any) {
+    console.error("Gumtree Fetch Error:", error);
+    setStatus("error");
+  }
+};
+
+/**
+ * 2. RIGHTMOVE FETCH LOGIC
+ * Endpoint: POST /api/v1/property/rightmove
+ * Pagination: Offset steps of 24 (0, 24, 48, 72...)
+ */
+const fetchRightmoveProperties = async (param: RightmovePayload | number) => {
+  if (isCoolingDown) {
+    addNotification("error", `Please wait ${cooldownSeconds} second(s) before making another request.`);
+    return;
+  }
+
   let pageToFetch = 1;
   let rmPayload: RightmovePayload | null = null;
 
@@ -85,84 +234,66 @@ const fetchProperties = async (param: number | RightmovePayload) => {
     pageToFetch = param;
     rmPayload = activeRmPayload;
   } else {
+    pageToFetch = 1;
     rmPayload = param;
-    setActiveRmPayload(param); // Cache for pagination controls
+    setActiveRmPayload(param);
   }
 
-  if (source === "rightmove" && !rmPayload) {
-    addNotification("error", "Please select a location from autocomplete first.");
-    return;
-  }
+  if (!rmPayload || !rmPayload.location || !rmPayload.regionId) return;
 
   setStatus("loading");
-  addNotification(
-    "info",
-    `Fetching ${source === "gumtree" ? "Gumtree" : "Rightmove"} listings for page ${pageToFetch}...`
-  );
+  startCooldownLock(10);
 
   try {
-    const apiUrl =  "http://localhost:9000";
-    let endpoint = `${apiUrl}/api/v1/property`;
-    let fetchOptions: RequestInit = { headers: { "Content-Type": "application/json" } };
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
+    const offsetIndex = ((pageToFetch - 1) * 24).toString();
 
-    if (source === "gumtree") {
-      if (pageToFetch > 1) {
-        fetchOptions.method = "POST";
-        fetchOptions.body = JSON.stringify({ page: pageToFetch });
-      } else {
-        fetchOptions.method = "GET";
-      }
-    } else {
-      endpoint = `${apiUrl}/api/v1/property/rightmove`;
-      fetchOptions.method = "POST";
-      const paginationOffset = ((pageToFetch - 1) * 24).toString();
+    const response = await fetch(`${apiUrl}/api/v1/property/rightmove`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        location: rmPayload.location,
+        regionId: rmPayload.regionId,
+        sinceAdded: rmPayload.sinceAdded || "14",
+        pagination: offsetIndex,
+      }),
+    });
 
-      fetchOptions.body = JSON.stringify({
-        ...rmPayload,
-        pagination: paginationOffset,
-      });
-    }
+    if (!response.ok) throw new Error(`Server status ${response.status}`);
 
-    const response = await fetch(endpoint, fetchOptions);
     const result = await response.json();
-
-    if (!result || !result.success) {
-      throw new Error(result?.message || "Failed to fetch valid listing schema.");
-    }
-
-    const innerPayload = result.data || {};
-    const properties = innerPayload.data || result.data || [];
-    const pagination = innerPayload.pagination || result.pagination || {};
+    const innerData = result.data || {};
+    const properties = Array.isArray(innerData) ? innerData : innerData.data || [];
+    const pagination = innerData.pagination || result.pagination || {};
 
     let totalPages = 1;
-    if (source === "gumtree") {
-      totalPages = pagination.numberOfPages || 1;
-    } else {
-      totalPages = pagination.total
-        ? Math.ceil(Number(pagination.total) / 24)
-        : pagination.options?.length || 1;
+    if (Array.isArray(pagination.options) && pagination.options.length > 0) {
+      totalPages = pagination.options.length;
+    } else if (pagination.total) {
+      totalPages = Math.ceil(Number(pagination.total) / 24);
     }
 
-    setNumberOfPages(totalPages);
+    setListingData(properties);
     setCurrentPage(pageToFetch);
+    setNumberOfPages(totalPages);
+    setStatus(properties.length > 0 ? "success" : "empty");
 
-    if (!Array.isArray(properties) || properties.length === 0) {
-      setListingData([]);
-      setStatus("empty");
-      addNotification("info", "No listings found for this search.");
-    } else {
-      setStatus("success");
-      setListingData(properties);
-      setExpandedDescriptions({});
-      addNotification("success", `Loaded ${properties.length} listings!`);
-    }
+    // SAVE TO RIGHTMOVE CACHE
+    localStorage.setItem(
+      RIGHTMOVE_CACHE_KEY,
+      JSON.stringify({
+        listingData: properties,
+        currentPage: pageToFetch,
+        numberOfPages: totalPages,
+        activeRmPayload: rmPayload,
+      })
+    );
   } catch (error: any) {
-    console.error("Data fetch failed:", error);
+    console.error("Rightmove Error:", error);
     setStatus("error");
-    setListingData([]);
-    addNotification("error", error?.message || "Communication error with your scraping backend.");
   }
 };
+
   const handleNextImage = (listingIdx: number, totalImages: number, e: React.MouseEvent) => {
     e.stopPropagation();
     setCarouselIndices(prev => ({ ...prev, [listingIdx]: ((prev[listingIdx] || 0) + 1) % totalImages }));
@@ -177,6 +308,16 @@ const fetchProperties = async (param: number | RightmovePayload) => {
     e.stopPropagation();
     setExpandedDescriptions(prev => ({ ...prev, [rowId]: !prev[rowId] }));
   };
+                  /**
+   * 3. UNIFIED PAGINATION CONTROL HANDLER
+   */
+ const handlePageChange = (newPage: number) => {
+  if (source === "gumtree") {
+    fetchGumtreeProperties(newPage);
+  } else {
+    fetchRightmoveProperties(newPage);
+  }
+};
 
   return (
     <div className="p-4 md:p-8 space-y-6 max-w-7xl mx-auto w-full min-h-screen flex flex-col bg-background relative">
@@ -220,25 +361,31 @@ const fetchProperties = async (param: number | RightmovePayload) => {
           />
         </div>
 
-        {source === "rightmove" && (
-          <RightmoveAutocompletion
-            onFetchListings={() => fetchProperties(1)}
-            isLoadingListings={status === "loading"}
-          />
-        )}
+       {/* RIGHTMOVE SECTION */}
+{source === "rightmove" && (
+  <RightmoveAutocompletion
+    onFetchListings={(payload) => fetchRightmoveProperties(payload)}
+    isLoadingListings={status === "loading"}
+  />
+)}
 
-        {source === "gumtree" && (
-          <div className="flex justify-end pt-2 border-t">
-            <Button 
-              onClick={() => fetchProperties(1)} 
-              disabled={status === "loading"}
-              className="px-6 h-11 text-base font-semibold shadow-md"
-            >
-              {status === "loading" ? <Loader2 className="h-5 w-5 mr-2 animate-spin" /> : <Search className="h-5 w-5 mr-2" />}
-              Fetch Gumtree Listings
-            </Button>
-          </div>
-        )}
+{/* GUMTREE SECTION */}
+{source === "gumtree" && (
+  <div className="flex justify-end pt-2 border-t">
+    <Button 
+      onClick={() => fetchGumtreeProperties(1)} 
+      disabled={status === "loading"}
+      className="px-6 h-11 text-base font-semibold shadow-md"
+    >
+      {status === "loading" ? (
+        <Loader2 className="h-5 w-5 mr-2 animate-spin" />
+      ) : (
+        <Search className="h-5 w-5 mr-2" />
+      )}
+      Fetch Gumtree Listings
+    </Button>
+  </div>
+)}
       </div>
 
       {/* Main Body */}
@@ -384,21 +531,29 @@ const fetchProperties = async (param: number | RightmovePayload) => {
         )}
 
         {/* Pagination */}
-        {status === "success" && (
-          <div className="flex items-center justify-between pt-4 border-t mt-6 bg-card p-4 rounded-2xl border shadow-sm">
-            <p className="text-sm font-medium text-muted-foreground">
-              Page <span className="text-foreground font-bold">{currentPage}</span> of <span className="text-foreground font-bold">{numberOfPages}</span>
-            </p>
-            <div className="flex items-center space-x-3">
-              <Button variant="outline" size="sm" disabled={currentPage <= 1} onClick={() => fetchProperties(currentPage - 1)} className="h-9 px-4 font-semibold">
-                <ChevronLeft className="h-4 w-4 mr-1" /> Previous
-              </Button>
-              <Button variant="outline" size="sm" disabled={currentPage >= numberOfPages} onClick={() => fetchProperties(currentPage + 1)} className="h-9 px-4 font-semibold">
-                Next <ChevronRight className="h-4 w-4 ml-1" />
-              </Button>
-            </div>
-          </div>
-        )}
+      {numberOfPages > 1 && (
+        <div className="flex items-center justify-between pt-4 border-t">
+          <Button
+            disabled={currentPage <= 1 || status === "loading"}
+            onClick={() => handlePageChange(currentPage - 1)}
+            variant="outline"
+          >
+            Previous
+          </Button>
+          
+          <span className="text-sm font-medium">
+            Page {currentPage} of {numberOfPages}
+          </span>
+
+          <Button
+            disabled={currentPage >= numberOfPages || status === "loading"}
+            onClick={() => handlePageChange(currentPage + 1)}
+            variant="outline"
+          >
+            Next
+          </Button>
+        </div>
+      )}
       </div>
     </div>
   );

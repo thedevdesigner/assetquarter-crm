@@ -39,7 +39,7 @@ export function RightmoveAutocompletion({
       return;
     }
 
-    const apiUrl =  "http://localhost:9000";
+    const apiUrl = "http://localhost:9000";
     fetch(`${apiUrl}/api/v1/rightmove/typeahead?query=${encodeURIComponent(value)}`)
       .then((res) => (res.ok ? res.json() : { matches: [] }))
       .then((data) => {
@@ -48,29 +48,36 @@ export function RightmoveAutocompletion({
       .catch(() => setSuggestions([]));
   };
 
-  // 2. Cache selected item & close dropdown
+  // 2. Cache selected item with safe property fallbacks
   const handleSelectOption = (item: any) => {
-    setQuery(item.displayName);
+    const labelText = item.displayName || item.normalisedSearchTerm || item.label || item.locationName;
+    const itemId = item.id || item.locationIdentifier || item.value;
+
+    setQuery(labelText);
     setSelectedItem({
-      displayName: item.displayName,
-      id: item.id || item.locationIdentifier,
+      displayName: labelText,
+      id: itemId,
     });
     setSuggestions([]);
   };
 
-  // 3. Construct payload and trigger POST request
-  const handleSubmit = () => {
-    if (!selectedItem) return;
+  // 3. Construct URI-encoded payload and trigger POST request
+ const handleSubmit = () => {
+  if (!selectedItem || !selectedItem.displayName || !selectedItem.id) return;
 
-    const payload: RightmovePayload = {
-      location: selectedItem.displayName,
-      regionId: `REGION^${selectedItem.id}`, // Format: REGION^87490
-      sinceAdded: sinceAdded,
-      pagination: "0", // Initial page offset
-    };
+  const rawId = String(selectedItem.id);
+  const formattedRegion = rawId.startsWith("REGION^") ? rawId : `REGION^${rawId}`;
 
-    onFetchListings(payload);
+  // Pass the encoded payload object directly up to page.tsx
+  const payload: RightmovePayload = {
+    location: selectedItem.displayName,
+    regionId: formattedRegion,
+    sinceAdded: sinceAdded,
+    pagination: "0",
   };
+
+  onFetchListings(payload);
+};
 
   return (
     <div className="pt-2 border-t flex flex-col md:flex-row items-end justify-between gap-4">
@@ -90,16 +97,21 @@ export function RightmoveAutocompletion({
 
         {suggestions.length > 0 && (
           <div className="absolute left-0 right-0 top-full mt-1 bg-card border rounded-xl shadow-lg z-50 max-h-60 overflow-y-auto">
-            {suggestions.map((item, idx) => (
-              <div
-                key={`${item.id}-${idx}`}
-                onClick={() => handleSelectOption(item)}
-                className="px-4 py-2 text-sm hover:bg-muted cursor-pointer flex justify-between items-center"
-              >
-                <span className="font-medium text-foreground">{item.displayName}</span>
-                <span className="text-xs text-muted-foreground font-mono">{item.id}</span>
-              </div>
-            ))}
+            {suggestions.map((item, idx) => {
+              const displayName = item.displayName || item.normalisedSearchTerm || item.label;
+              const itemId = item.id || item.locationIdentifier;
+
+              return (
+                <div
+                  key={`${itemId}-${idx}`}
+                  onClick={() => handleSelectOption(item)}
+                  className="px-4 py-2 text-sm hover:bg-muted cursor-pointer flex justify-between items-center"
+                >
+                  <span className="font-medium text-foreground">{displayName}</span>
+                  <span className="text-xs text-muted-foreground font-mono">{itemId}</span>
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
