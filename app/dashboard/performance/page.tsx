@@ -125,7 +125,7 @@ export default function PerformancePage() {
         {/* Date Selector */}
         <div className="grid gap-2">
           <Popover>
-            <PopoverTrigger aschild="true">
+            <PopoverTrigger asChild>
               <Button
                 variant="outline"
                 className={cn(
