@@ -39,7 +39,7 @@ export function RightmoveAutocompletion({
       return;
     }
 
-    const apiUrl = process.env.NEXT_PUBLIC_API_URl;
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL;
     fetch(`${apiUrl}/api/v1/rightmove/typeahead?query=${encodeURIComponent(value)}`)
       .then((res) => (res.ok ? res.json() : { matches: [] }))
       .then((data) => {
