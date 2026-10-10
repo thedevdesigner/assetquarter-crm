@@ -17,6 +17,16 @@ import {
   Info
 } from "lucide-react";
 
+export type FollowUpStatus = 
+  | "pending" 
+  | "no_answer" 
+  | "callback" 
+  | "sa_pending" 
+  | "sa_allowed" 
+  | "viewing_booked" 
+  | "rejected" 
+  | "not_interested";
+
 interface FollowUpItem {
   id: string; // Clean UUID key
   title: string;
@@ -26,10 +36,22 @@ interface FollowUpItem {
   url: string;
   imageUrl: string;
   dateAdded: string; // ISO string for time filtering
-  status: "pending" | "contacted" | "noanswer" | "rejected";
+  status: FollowUpStatus;
   attempts: number; // Max 3
   notes: string;
 }
+
+// Helper to format raw status values into human-readable labels
+const STATUS_LABELS: Record<FollowUpStatus, string> = {
+  pending: "Pending",
+  no_answer: "No Answer",
+  callback: "Callback",
+  sa_pending: "SA Pending",
+  sa_allowed: "SA Allowed",
+  viewing_booked: "Viewing Booked",
+  rejected: "Rejected",
+  not_interested: "Not Interested",
+};
 
 // ==========================================
 // [SECTION: NOTIFICATION SYSTEM TYPES]
@@ -40,7 +62,7 @@ interface Notification {
   message: string;
 }
 
-const API_BASE = `${process.env.NEXT_PUBLIC_API_URL}/api/v1/followups`;
+const API_BASE = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:9000"}/api/v1/followups`;
 const STORAGE_KEY = "property_followups";
 
 export default function FollowUpsPage() {
@@ -123,13 +145,14 @@ export default function FollowUpsPage() {
 
   // 2. Status Handler
   const handleStatusChange = async (id: string, newStatusStr: string) => {
-    const newStatus = newStatusStr as FollowUpItem["status"];
+    const newStatus = newStatusStr as FollowUpStatus;
     const updated = followUps.map((item) =>
       item.id === id ? { ...item, status: newStatus } : item
     );
     updateLocalAndState(updated);
 
-    addNotification("info", `Updated status to "${newStatus.toUpperCase()}".`);
+    const displayLabel = STATUS_LABELS[newStatus] || newStatus;
+    addNotification("info", `Updated status to "${displayLabel}".`);
 
     try {
       await fetch(`${API_BASE}/${id}`, {
@@ -225,6 +248,28 @@ export default function FollowUpsPage() {
     return true;
   });
 
+  // Color helper for status select dropdown & badges
+  const getStatusStyle = (status: FollowUpStatus) => {
+    switch (status) {
+      case "sa_allowed":
+        return "bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/40";
+      case "viewing_booked":
+        return "bg-indigo-50 text-indigo-700 border-indigo-300 dark:bg-indigo-950/40";
+      case "callback":
+        return "bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40";
+      case "sa_pending":
+        return "bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/40";
+      case "no_answer":
+        return "bg-zinc-100 text-zinc-700 border-zinc-300 dark:bg-zinc-800 dark:text-zinc-300";
+      case "rejected":
+      case "not_interested":
+        return "bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-950/40";
+      case "pending":
+      default:
+        return "bg-slate-100 text-slate-700 border-slate-300 dark:bg-slate-800 dark:text-slate-300";
+    }
+  };
+
   return (
     <div className="p-4 md:p-8 space-y-6 max-w-7xl mx-auto w-full min-h-screen flex flex-col bg-background relative">
       
@@ -281,20 +326,24 @@ export default function FollowUpsPage() {
           <select 
             value={filterStatus} 
             onChange={(e) => setFilterStatus(e.target.value)}
-            className="h-10 px-3 rounded-xl border bg-background text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary"
+            className="h-10 px-3 rounded-xl border bg-background text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer"
           >
             <option value="all">All Statuses</option>
-            <option value="pending">Pending / Interested</option>
-            <option value="contacted">Contacted</option>
-            <option value="converted">Converted / Viewing</option>
+            <option value="pending">Pending</option>
+            <option value="no_answer">No Answer</option>
+            <option value="callback">Callback</option>
+            <option value="sa_pending">SA Pending</option>
+            <option value="sa_allowed">SA Allowed</option>
+            <option value="viewing_booked">Viewing Booked</option>
             <option value="rejected">Rejected</option>
+            <option value="not_interested">Not Interested</option>
           </select>
 
           {/* Time Filter */}
           <select 
             value={filterTime} 
             onChange={(e) => setFilterTime(e.target.value)}
-            className="h-10 px-3 rounded-xl border bg-background text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary"
+            className="h-10 px-3 rounded-xl border bg-background text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary cursor-pointer"
           >
             <option value="all">All Time Periods</option>
             <option value="today">Today&apos;s Follow-Ups</option>
@@ -388,19 +437,18 @@ export default function FollowUpsPage() {
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-semibold text-muted-foreground">Status:</span>
                         <select 
-                          value={item.status}
+                          value={item.status || "pending"}
                           onChange={(e) => handleStatusChange(item.id, e.target.value)}
-                          className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border focus:outline-none cursor-pointer ${
-                            item.status === 'converted' ? 'bg-emerald-50 text-emerald-700 border-emerald-300 dark:bg-emerald-950/40' :
-                            item.status === 'contacted' ? 'bg-blue-50 text-blue-700 border-blue-300 dark:bg-blue-950/40' :
-                            item.status === 'rejected' ? 'bg-rose-50 text-rose-700 border-rose-300 dark:bg-rose-950/40' :
-                            'bg-amber-50 text-amber-700 border-amber-300 dark:bg-amber-950/40'
-                          }`}
+                          className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border focus:outline-none cursor-pointer transition-colors ${getStatusStyle(item.status)}`}
                         >
                           <option value="pending">Pending</option>
-                          <option value="contacted">Contacted</option>
-                          <option value="converted">Converted</option>
+                          <option value="no_answer">No Answer</option>
+                          <option value="callback">Callback</option>
+                          <option value="sa_pending">SA Pending</option>
+                          <option value="sa_allowed">SA Allowed</option>
+                          <option value="viewing_booked">Viewing Booked</option>
                           <option value="rejected">Rejected</option>
+                          <option value="not_interested">Not Interested</option>
                         </select>
                       </div>
 
