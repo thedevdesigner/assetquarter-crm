@@ -26,7 +26,7 @@ interface FollowUpItem {
   url: string;
   imageUrl: string;
   dateAdded: string; // ISO string for time filtering
-  status: "pending" | "contacted" | "converted" | "rejected";
+  status: "pending" | "contacted" | "noanswer" | "rejected";
   attempts: number; // Max 3
   notes: string;
 }
