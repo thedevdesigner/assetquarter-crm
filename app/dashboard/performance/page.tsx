@@ -46,39 +46,26 @@ interface FollowUpItem {
   customerName?: string;
 }
 
-const API_BASE = `${process.env.NEXT_PUBLIC_API_URL}/api/v1/followups`;
-const STORAGE_KEY = "property_followups";
+const API_BASE = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:9000"}/api/v1/followups`;
 
 export default function PerformancePage() {
   const [items, setItems] = useState<FollowUpItem[]>([]);
   const [selectedDate, setSelectedDate] = useState<Date>(new Date());
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // Fetch Data: Try Turso API first, fallback to localStorage
+  // Fetch directly from the Turso database API
   const loadPerformanceData = useCallback(async () => {
-    let localData: FollowUpItem[] = [];
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        localData = JSON.parse(saved);
-        setItems(localData);
-      } catch (e) {
-        console.error("Failed to parse local follow-ups cache:", e);
-      }
-    }
-
     try {
-      setIsLoading(localData.length === 0);
+      setIsLoading(true);
       const res = await fetch(API_BASE);
-      if (res.ok) {
-        const json = await res.json();
-        if (json.success && Array.isArray(json.data)) {
-          setItems(json.data);
-          localStorage.setItem(STORAGE_KEY, JSON.stringify(json.data));
-        }
+      if (!res.ok) throw new Error(`HTTP Error: ${res.status}`);
+
+      const json = await res.json();
+      if (json.success && Array.isArray(json.data)) {
+        setItems(json.data);
       }
     } catch (err) {
-      console.warn("API fetch failed, utilizing cached local storage data:", err);
+      console.error("Failed to fetch performance metrics from database:", err);
     } finally {
       setIsLoading(false);
     }
@@ -139,7 +126,7 @@ export default function PerformancePage() {
             {isLoading && <RefreshCw className="h-4 w-4 animate-spin text-muted-foreground" />}
           </h1>
           <p className="text-sm text-muted-foreground mt-1">
-            Real-time pipeline analysis and outreach metrics calculated strictly from your follow-up data.
+            Real-time pipeline analysis and outreach metrics calculated strictly from your database records.
           </p>
         </div>
 
@@ -152,8 +139,7 @@ export default function PerformancePage() {
                 className={cn(
                   "w-[240px] justify-start text-left font-normal h-11 rounded-xl border bg-background",
                   !selectedDate && "text-muted-foreground"
-                )}
-              >
+                )}>
                 <CalendarIcon className="mr-2 h-4 w-4" />
                 {selectedDate ? format(selectedDate, "PPP") : <span>Pick a date</span>}
               </Button>

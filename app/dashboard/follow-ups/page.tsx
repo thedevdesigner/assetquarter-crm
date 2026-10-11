@@ -55,9 +55,6 @@ const STATUS_LABELS: Record<FollowUpStatus, string> = {
   not_interested: "Not Interested",
 };
 
-// ==========================================
-// [SECTION: NOTIFICATION SYSTEM TYPES]
-// ==========================================
 interface Notification {
   id: number;
   type: "success" | "info" | "error";
@@ -65,7 +62,6 @@ interface Notification {
 }
 
 const API_BASE = `${process.env.NEXT_PUBLIC_API_URL || "http://localhost:9000"}/api/v1/followups`;
-const STORAGE_KEY = "property_followups";
 
 export default function FollowUpsPage() {
   const [followUps, setFollowUps] = useState<FollowUpItem[]>([]);
@@ -75,9 +71,6 @@ export default function FollowUpsPage() {
   const [isSyncing, setIsSyncing] = useState<boolean>(false);
   const [isLoading, setIsLoading] = useState<boolean>(true);
 
-  // ==========================================
-  // [SECTION: NOTIFICATION SYSTEM STATE & LOGIC]
-  // ==========================================
   const [notifications, setNotifications] = useState<Notification[]>([]);
 
   const addNotification = (type: "success" | "info" | "error", message: string) => {
@@ -87,71 +80,56 @@ export default function FollowUpsPage() {
       setNotifications(prev => prev.filter(n => n.id !== id));
     }, 4000);
   };
-  // ==========================================
 
-  // Synchronize React state and LocalStorage in one step
-  const updateLocalAndState = useCallback((newList: FollowUpItem[]) => {
-    setFollowUps(newList);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(newList));
+  // Fetch directly from Turso Database API on mount
+  const fetchFromDatabase = useCallback(async () => {
+    try {
+      setIsLoading(true);
+      setIsSyncing(true);
+
+      const response = await fetch(API_BASE);
+      if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
+
+      const result = await response.json();
+      if (result.success && Array.isArray(result.data)) {
+        setFollowUps(result.data);
+      }
+    } catch (error) {
+      console.error("Database fetch failed:", error);
+      addNotification("error", "Failed to fetch follow-ups from database.");
+    } finally {
+      setIsLoading(false);
+      setIsSyncing(false);
+    }
   }, []);
 
-  // Mount Phase: Hydrate from LocalStorage instantly, then sync with Turso DB
   useEffect(() => {
-    let cachedData: FollowUpItem[] = [];
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      try {
-        cachedData = JSON.parse(saved);
-        setFollowUps(cachedData);
-      } catch (e) {
-        console.error("Failed to parse follow-ups storage:", e);
-      }
-    }
-
-    const fetchFromDatabase = async () => {
-      try {
-        setIsLoading(cachedData.length === 0);
-        setIsSyncing(true);
-
-        const response = await fetch(API_BASE);
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-
-        const result = await response.json();
-        if (result.success && Array.isArray(result.data)) {
-          updateLocalAndState(result.data);
-        }
-      } catch (error) {
-        console.warn("Background DB fetch failed; maintaining local storage cache:", error);
-      } finally {
-        setIsLoading(false);
-        setIsSyncing(false);
-      }
-    };
-
     fetchFromDatabase();
-  }, [updateLocalAndState]);
+  }, [fetchFromDatabase]);
 
   // 1. Delete Handler
   const handleDelete = async (id: string, title: string) => {
-    const updated = followUps.filter((item) => item.id !== id);
-    updateLocalAndState(updated);
-    
+    // Optimistic UI update
+    setFollowUps((prev) => prev.filter((item) => item.id !== id));
     addNotification("info", `Removed "${title || "Property"}" from follow-ups.`);
 
     try {
       await fetch(`${API_BASE}/${id}`, { method: "DELETE" });
     } catch (err) {
-      console.warn("Delete DB sync failed:", err);
+      console.error("Delete DB sync failed:", err);
+      addNotification("error", "Failed to delete record on server.");
+      fetchFromDatabase(); // Rollback/Re-sync
     }
   };
 
   // 2. Status Handler
   const handleStatusChange = async (id: string, newStatusStr: string) => {
     const newStatus = newStatusStr as FollowUpStatus;
-    const updated = followUps.map((item) =>
-      item.id === id ? { ...item, status: newStatus } : item
+    
+    // Optimistic UI update
+    setFollowUps((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, status: newStatus } : item))
     );
-    updateLocalAndState(updated);
 
     const displayLabel = STATUS_LABELS[newStatus] || newStatus;
     addNotification("info", `Updated status to "${displayLabel}".`);
@@ -163,17 +141,20 @@ export default function FollowUpsPage() {
         body: JSON.stringify({ status: newStatus }),
       });
     } catch (err) {
-      console.warn("Status DB sync failed:", err);
+      console.error("Status DB sync failed:", err);
+      addNotification("error", "Failed to update status on server.");
+      fetchFromDatabase();
     }
   };
 
   // 3. Contact Attempts Counter Handler (Bounded 0 to 3)
   const handleAttemptsChange = async (id: string, newAttempts: number) => {
     const boundedAttempts = Math.min(Math.max(newAttempts, 0), 3);
-    const updated = followUps.map((item) =>
-      item.id === id ? { ...item, attempts: boundedAttempts } : item
+    
+    // Optimistic UI update
+    setFollowUps((prev) =>
+      prev.map((item) => (item.id === id ? { ...item, attempts: boundedAttempts } : item))
     );
-    updateLocalAndState(updated);
 
     addNotification("info", `Follow-up attempts updated to ${boundedAttempts}/3.`);
 
@@ -184,41 +165,34 @@ export default function FollowUpsPage() {
         body: JSON.stringify({ attempts: boundedAttempts }),
       });
     } catch (err) {
-      console.warn("Attempts DB sync failed:", err);
+      console.error("Attempts DB sync failed:", err);
+      addNotification("error", "Failed to update attempts on server.");
+      fetchFromDatabase();
     }
   };
 
-  // 4. Local Notes Text Change
+  // 4. Local Notes Text Change (State only)
   const handleNotesChange = (id: string, text: string) => {
     setFollowUps((prev) =>
       prev.map((item) => (item.id === id ? { ...item, notes: text } : item))
     );
   };
 
-  // 5. Notes Blur Auto-Save Handler
+  // 5. Notes Blur API Auto-Save Handler
   const handleNotesBlur = async (id: string, notesText: string) => {
-    const saved = localStorage.getItem(STORAGE_KEY);
-    if (saved) {
-      const parsed: FollowUpItem[] = JSON.parse(saved);
-      const existing = parsed.find((item) => item.id === id);
-      if (existing && existing.notes === notesText) return; // Skip if unchanged
-    }
-
-    const updated = followUps.map((item) =>
-      item.id === id ? { ...item, notes: notesText } : item
-    );
-    updateLocalAndState(updated);
-
-    addNotification("success", "Notes updated successfully.");
-
     try {
-      await fetch(`${API_BASE}/${id}`, {
+      const response = await fetch(`${API_BASE}/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ notes: notesText }),
       });
+
+      if (response.ok) {
+        addNotification("success", "Notes updated successfully.");
+      }
     } catch (err) {
-      console.warn("Notes DB sync failed:", err);
+      console.error("Notes DB sync failed:", err);
+      addNotification("error", "Failed to save notes to database.");
     }
   };
 
@@ -244,7 +218,8 @@ export default function FollowUpsPage() {
       const matchTitle = item.title?.toLowerCase().includes(query);
       const matchLocation = item.location?.toLowerCase().includes(query);
       const matchPhone = item.phone?.toLowerCase().includes(query);
-      if (!matchTitle && !matchLocation && !matchPhone) return false;
+      const matchCustomer = item.customerName?.toLowerCase().includes(query);
+      if (!matchTitle && !matchLocation && !matchPhone && !matchCustomer) return false;
     }
 
     return true;
@@ -275,9 +250,7 @@ export default function FollowUpsPage() {
   return (
     <div className="p-4 md:p-8 space-y-6 max-w-7xl mx-auto w-full min-h-screen flex flex-col bg-background relative">
       
-      {/* ========================================== */}
-      {/* [SECTION: NOTIFICATION TOAST CONTAINER UI] */}
-      {/* ========================================== */}
+      {/* Toast Notifications */}
       <div className="fixed top-5 right-5 z-50 flex flex-col space-y-3 max-w-sm w-full pointer-events-none">
         {notifications.map(n => {
           let bgStyle = "bg-blue-600 text-white";
@@ -298,7 +271,6 @@ export default function FollowUpsPage() {
           );
         })}
       </div>
-      {/* ========================================== */}
 
       {/* Header */}
       <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-card p-6 rounded-2xl border shadow-sm">
@@ -324,7 +296,6 @@ export default function FollowUpsPage() {
       {/* Filter and Search Bar Controls */}
       <div className="bg-card p-4 rounded-2xl border shadow-sm flex flex-col md:flex-row gap-4 items-center justify-between">
         <div className="flex flex-wrap items-center gap-3 w-full md:w-auto">
-          {/* Status Filter */}
           <select 
             value={filterStatus} 
             onChange={(e) => setFilterStatus(e.target.value)}
@@ -341,7 +312,6 @@ export default function FollowUpsPage() {
             <option value="not_interested">Not Interested</option>
           </select>
 
-          {/* Time Filter */}
           <select 
             value={filterTime} 
             onChange={(e) => setFilterTime(e.target.value)}
@@ -354,7 +324,6 @@ export default function FollowUpsPage() {
           </select>
         </div>
 
-        {/* Search Bar */}
         <div className="w-full md:w-72">
           <input 
             type="text" 
@@ -435,7 +404,6 @@ export default function FollowUpsPage() {
 
                     {/* CRM Controls Row: Status & Attempt Counter */}
                     <div className="flex flex-wrap items-center gap-4 pt-2 border-t">
-                      {/* Status Selector */}
                       <div className="flex items-center gap-2">
                         <span className="text-xs font-semibold text-muted-foreground">Status:</span>
                         <select 
@@ -454,7 +422,6 @@ export default function FollowUpsPage() {
                         </select>
                       </div>
 
-                      {/* Contact Attempts Counter (Max 3) */}
                       <div className="flex items-center gap-2 bg-muted/60 px-3 py-1 rounded-lg border">
                         <span className="text-xs font-semibold text-muted-foreground">Follow-Up Attempts:</span>
                         <div className="flex items-center gap-1">
@@ -462,7 +429,6 @@ export default function FollowUpsPage() {
                             onClick={() => handleAttemptsChange(item.id, (item.attempts || 0) - 1)}
                             disabled={(item.attempts || 0) <= 0}
                             className="p-1 rounded hover:bg-background disabled:opacity-30 cursor-pointer"
-                            title="Decrease attempts"
                           >
                             <Minus className="h-3 w-3" />
                           </button>
@@ -471,7 +437,6 @@ export default function FollowUpsPage() {
                             onClick={() => handleAttemptsChange(item.id, (item.attempts || 0) + 1)}
                             disabled={(item.attempts || 0) >= 3}
                             className="p-1 rounded hover:bg-background disabled:opacity-30 cursor-pointer"
-                            title="Increase attempts"
                           >
                             <Plus className="h-3 w-3" />
                           </button>
@@ -494,7 +459,7 @@ export default function FollowUpsPage() {
 
                   {/* Card Footer Actions */}
                   <div className="pt-3 border-t flex items-center justify-between">
-                   <div className="flex items-center gap-3">
+                    <div className="flex items-center gap-3">
                       {item.customerName && (
                         <div className="flex items-center gap-1.5 text-xs font-medium text-foreground bg-muted px-3 py-1.5 rounded-xl border">
                           <User className="h-3.5 w-3.5 text-muted-foreground" />

@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useRef, useEffect } from "react";
 import { 
   Phone, 
   Search,
@@ -29,6 +29,9 @@ interface Notification {
   message: string;
 }
 
+const GUMTREE_STORAGE_KEY = "property_explorer_gumtree_cache";
+const RIGHTMOVE_STORAGE_KEY = "property_explorer_rightmove_cache";
+
 export default function DashboardPage() {
 
   // Mandatory cooldown state
@@ -54,12 +57,83 @@ export default function DashboardPage() {
   const [currentPage, setCurrentPage] = useState(1);
   const [numberOfPages, setNumberOfPages] = useState(1);
 
-  // New Filter state for Gumtree listings ("all" | "with_numbers")
+  // Filter state for Gumtree listings ("all" | "with_numbers")
   const [gumtreeFilter, setGumtreeFilter] = useState<"all" | "with_numbers">("all");
 
   const [notifications, setNotifications] = useState<Notification[]>([]);
   const [carouselIndices, setCarouselIndices] = useState<Record<number, number>>({});
   const [expandedDescriptions, setExpandedDescriptions] = useState<Record<string, boolean>>({});
+
+  // ==========================================
+  // PERSISTENT STORAGE-BACKED CACHE REFERENCES
+  // ==========================================
+  const gumtreeCacheRef = useRef<Record<number, { listings: any[]; numberOfPages: number }>>({});
+  const rightmoveCacheRef = useRef<Record<string, Record<number, { listings: any[]; numberOfPages: number }>>>({});
+  const [activeRmPayload, setActiveRmPayload] = useState<RightmovePayload | null>(null);
+
+  // 1. Load persistent cache from localStorage on initial mount
+  useEffect(() => {
+    try {
+      const savedGumtree = localStorage.getItem(GUMTREE_STORAGE_KEY);
+      if (savedGumtree) {
+        gumtreeCacheRef.current = JSON.parse(savedGumtree);
+      }
+
+      const savedRightmove = localStorage.getItem(RIGHTMOVE_STORAGE_KEY);
+      if (savedRightmove) {
+        const parsedRm = JSON.parse(savedRightmove);
+        rightmoveCacheRef.current = parsedRm.cache || {};
+        if (parsedRm.activePayload) {
+          setActiveRmPayload(parsedRm.activePayload);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to load explorer cache from localStorage:", e);
+    }
+  }, []);
+
+  // 2. Restore view when switching sources/tabs or refreshing
+  useEffect(() => {
+    if (source === "gumtree") {
+      if (gumtreeCacheRef.current[currentPage]) {
+        const cached = gumtreeCacheRef.current[currentPage];
+        setListingData(cached.listings);
+        setNumberOfPages(cached.numberOfPages);
+        setStatus(cached.listings.length > 0 ? "success" : "empty");
+      } else if (Object.keys(gumtreeCacheRef.current).length > 0) {
+        const firstPage = Number(Object.keys(gumtreeCacheRef.current)[0]);
+        const cached = gumtreeCacheRef.current[firstPage];
+        setCurrentPage(firstPage);
+        setListingData(cached.listings);
+        setNumberOfPages(cached.numberOfPages);
+        setStatus(cached.listings.length > 0 ? "success" : "empty");
+      } else {
+        setListingData([]);
+        setCurrentPage(1);
+        setNumberOfPages(1);
+        setStatus("idle");
+      }
+    } else if (source === "rightmove" && activeRmPayload) {
+      const cacheKey = `${activeRmPayload.regionId}-${activeRmPayload.sinceAdded || "14"}`;
+      const rmCache = rightmoveCacheRef.current[cacheKey];
+      if (rmCache && rmCache[currentPage]) {
+        const cached = rmCache[currentPage];
+        setListingData(cached.listings);
+        setNumberOfPages(cached.numberOfPages);
+        setStatus(cached.listings.length > 0 ? "success" : "empty");
+      } else {
+        setListingData([]);
+        setCurrentPage(1);
+        setNumberOfPages(1);
+        setStatus("idle");
+      }
+    } else {
+      setListingData([]);
+      setCurrentPage(1);
+      setNumberOfPages(1);
+      setStatus("idle");
+    }
+  }, [source, activeRmPayload]);
 
   const addNotification = (type: "success" | "info" | "error", message: string) => {
     const id = Date.now();
@@ -73,15 +147,7 @@ export default function DashboardPage() {
     if (!listing) return;
 
     const sourceUrl = listing.url || listing.propertyUrl || "";
-    const existing: FollowUpItem[] = JSON.parse(localStorage.getItem("property_followups") || "[]");
-
-    const isDuplicate = existing.some((item) => sourceUrl && item.url === sourceUrl);
-    if (isDuplicate) {
-      addNotification("info", "This listing is already in your follow-up pipeline.");
-      return;
-    }
-
-    const phoneNum = listing.srpContactDetail?.replyPhone || listing.customer?.contactTelephone || "";
+    const phoneNum = listing.srpContactDetail?.replyPhone || listing.phone || "";
     const contactName = listing.customerName || listing.customer?.name || "";
 
     const newItem: FollowUpItem = {
@@ -100,8 +166,6 @@ export default function DashboardPage() {
       dateAdded: new Date().toISOString(),
     };
 
-    const updated = [newItem, ...existing];
-    localStorage.setItem("property_followups", JSON.stringify(updated));
     addNotification("success", `Added "${newItem.title}" to follow-ups!`);
 
     fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/v1/followups`, {
@@ -111,46 +175,25 @@ export default function DashboardPage() {
     }).catch((err) => console.warn("DB Sync delayed:", err));
   };
 
-  const GUMTREE_CACHE_KEY = "property_dashboard_gumtree_cache";
-  const RIGHTMOVE_CACHE_KEY = "property_dashboard_rightmove_cache";
-
-  useEffect(() => {
-    const cacheKey = source === "gumtree" ? GUMTREE_CACHE_KEY : RIGHTMOVE_CACHE_KEY;
-    const savedCache = localStorage.getItem(cacheKey);
-
-    if (savedCache) {
-      try {
-        const parsed = JSON.parse(savedCache);
-        setListingData(parsed.listingData || []);
-        setCurrentPage(parsed.currentPage || 1);
-        setNumberOfPages(parsed.numberOfPages || 1);
-        setStatus(parsed.listingData?.length > 0 ? "success" : "idle");
-
-        if (source === "rightmove" && parsed.activeRmPayload) {
-          setActiveRmPayload(parsed.activeRmPayload);
-        }
-      } catch (e) {
-        console.error("Failed to parse cached data:", e);
-      }
-    } else {
-      setListingData([]);
-      setCurrentPage(1);
-      setNumberOfPages(1);
-      setStatus("idle");
-    }
-  }, [source]);
-
-  const [activeRmPayload, setActiveRmPayload] = useState<RightmovePayload | null>(null);
-
   const fetchGumtreeProperties = async (page: number = 1) => {
+    const pageNum = typeof page === "number" ? page : 1;
+
+    // Check cache first for instant navigation
+    if (gumtreeCacheRef.current[pageNum]) {
+      const cached = gumtreeCacheRef.current[pageNum];
+      setListingData(cached.listings);
+      setCurrentPage(pageNum);
+      setNumberOfPages(cached.numberOfPages);
+      setStatus(cached.listings.length > 0 ? "success" : "empty");
+      return;
+    }
+
     if (isCoolingDown) {
       addNotification("error", `Please wait ${cooldownSeconds} second(s) before making another request.`);
       return;
     }
 
-    const pageNum = typeof page === "number" ? page : 1;
     const isPost = pageNum > 1;
-
     setStatus("loading");
     startCooldownLock(10);
 
@@ -180,19 +223,17 @@ export default function DashboardPage() {
       const totalPages = Number(pagination.numberOfPages || 1);
       const activePage = Number(pagination.currentPage || pageNum);
 
+      // Save into ref cache & persist to localStorage
+      gumtreeCacheRef.current[activePage] = {
+        listings: properties,
+        numberOfPages: totalPages,
+      };
+      localStorage.setItem(GUMTREE_STORAGE_KEY, JSON.stringify(gumtreeCacheRef.current));
+
       setListingData(properties);
       setCurrentPage(activePage);
       setNumberOfPages(totalPages);
       setStatus(properties.length > 0 ? "success" : "empty");
-
-      localStorage.setItem(
-        GUMTREE_CACHE_KEY,
-        JSON.stringify({
-          listingData: properties,
-          currentPage: activePage,
-          numberOfPages: totalPages,
-        })
-      );
     } catch (error: any) {
       console.error("Gumtree Fetch Error:", error);
       setStatus("error");
@@ -200,11 +241,6 @@ export default function DashboardPage() {
   };
 
   const fetchRightmoveProperties = async (param: RightmovePayload | number) => {
-    if (isCoolingDown) {
-      addNotification("error", `Please wait ${cooldownSeconds} second(s) before making another request.`);
-      return;
-    }
-
     let pageToFetch = 1;
     let rmPayload: RightmovePayload | null = null;
 
@@ -218,6 +254,23 @@ export default function DashboardPage() {
     }
 
     if (!rmPayload || !rmPayload.location || !rmPayload.regionId) return;
+
+    const cacheKey = `${rmPayload.regionId}-${rmPayload.sinceAdded || "14"}`;
+
+    // Check cache first for instant navigation
+    if (rightmoveCacheRef.current[cacheKey]?.[pageToFetch]) {
+      const cached = rightmoveCacheRef.current[cacheKey][pageToFetch];
+      setListingData(cached.listings);
+      setCurrentPage(pageToFetch);
+      setNumberOfPages(cached.numberOfPages);
+      setStatus(cached.listings.length > 0 ? "success" : "empty");
+      return;
+    }
+
+    if (isCoolingDown) {
+      addNotification("error", `Please wait ${cooldownSeconds} second(s) before making another request.`);
+      return;
+    }
 
     setStatus("loading");
     startCooldownLock(10);
@@ -251,20 +304,27 @@ export default function DashboardPage() {
         totalPages = Math.ceil(Number(pagination.total) / 24);
       }
 
+      // Save into cache & persist to localStorage
+      if (!rightmoveCacheRef.current[cacheKey]) {
+        rightmoveCacheRef.current[cacheKey] = {};
+      }
+      rightmoveCacheRef.current[cacheKey][pageToFetch] = {
+        listings: properties,
+        numberOfPages: totalPages,
+      };
+
+      localStorage.setItem(
+        RIGHTMOVE_STORAGE_KEY,
+        JSON.stringify({
+          cache: rightmoveCacheRef.current,
+          activePayload: rmPayload,
+        })
+      );
+
       setListingData(properties);
       setCurrentPage(pageToFetch);
       setNumberOfPages(totalPages);
       setStatus(properties.length > 0 ? "success" : "empty");
-
-      localStorage.setItem(
-        RIGHTMOVE_CACHE_KEY,
-        JSON.stringify({
-          listingData: properties,
-          currentPage: pageToFetch,
-          numberOfPages: totalPages,
-          activeRmPayload: rmPayload,
-        })
-      );
     } catch (error: any) {
       console.error("Rightmove Error:", error);
       setStatus("error");
@@ -294,7 +354,6 @@ export default function DashboardPage() {
     }
   };
 
-  // Compute filtered listings based on source and filter settings
   const displayedListings = listingData.filter((item) => {
     if (source === "gumtree" && gumtreeFilter === "with_numbers") {
       const phoneNum = item.srpContactDetail?.replyPhone;
@@ -340,7 +399,6 @@ export default function DashboardPage() {
             source={source} 
             onSourceChange={(newSource) => {
               setSource(newSource);
-              setStatus("idle");
               setGumtreeFilter("all");
             }} 
           />
@@ -348,14 +406,16 @@ export default function DashboardPage() {
 
         {source === "rightmove" && (
           <RightmoveAutocompletion
-            onFetchListings={(payload) => fetchRightmoveProperties(payload)}
+            onFetchListings={(payload) => {
+              setActiveRmPayload(payload);
+              fetchRightmoveProperties(payload);
+            }}
             isLoadingListings={status === "loading"}
           />
         )}
 
         {source === "gumtree" && (
           <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t">
-            {/* Gumtree Filter Controls */}
             <div className="flex items-center gap-2 w-full sm:w-auto">
               <Filter className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Filter:</span>
