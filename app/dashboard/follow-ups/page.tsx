@@ -14,7 +14,8 @@ import {
   RefreshCw,
   CheckCircle2,
   AlertCircle,
-  Info
+  Info,
+  User  
 } from "lucide-react";
 
 export type FollowUpStatus = 
@@ -38,6 +39,7 @@ interface FollowUpItem {
   dateAdded: string; // ISO string for time filtering
   status: FollowUpStatus;
   attempts: number; // Max 3
+  customerName?: string; // Added Customer Name field
   notes: string;
 }
 
@@ -492,19 +494,25 @@ export default function FollowUpsPage() {
 
                   {/* Card Footer Actions */}
                   <div className="pt-3 border-t flex items-center justify-between">
-                    <div>
+                   <div className="flex items-center gap-3">
+                      {item.customerName && (
+                        <div className="flex items-center gap-1.5 text-xs font-medium text-foreground bg-muted px-3 py-1.5 rounded-xl border">
+                          <User className="h-3.5 w-3.5 text-muted-foreground" />
+                          <span>{item.customerName}</span>
+                        </div>
+                      )}
+
                       {item.phone ? (
                         <a 
                           href={`tel:${item.phone}`} 
                           className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-50 dark:bg-emerald-950/30 text-emerald-700 dark:text-emerald-400 text-xs font-semibold border border-emerald-200 hover:bg-emerald-100 transition-colors"
                         >
-                          <Phone className="h-3.5 w-3.5" /> Call {item.phone}
+                          <Phone className="h-3.5 w-3.5" /> {item.phone}
                         </a>
                       ) : (
-                        <span className="text-xs text-muted-foreground italic">No direct phone number</span>
+                        <span className="text-xs text-muted-foreground italic">No phone available</span>
                       )}
                     </div>
-
                     <button 
                       onClick={() => handleDelete(item.id, item.title)}
                       className="inline-flex items-center gap-1 text-xs font-medium text-rose-600 hover:text-rose-700 px-2.5 py-1.5 rounded-lg hover:bg-rose-50 dark:hover:bg-rose-950/20 transition-colors cursor-pointer"

@@ -10,6 +10,7 @@ export interface FollowUpItem {
   dateAdded: string;
   status: "pending" | "contacted" | "converted" | "rejected";
   attempts: number;
+  contactName:string;
   notes: string;
 }
 
@@ -53,6 +54,7 @@ export const normalizeToFollowUp = (rawItem: any, source: "gumtree" | "rightmove
       status: "pending",
       attempts: 0,
       notes: "",
+      contactName:"",
       dateAdded: new Date().toISOString(),
     };
   }
@@ -69,6 +71,7 @@ export const normalizeToFollowUp = (rawItem: any, source: "gumtree" | "rightmove
     status: "pending",
     attempts: 0,
     notes: "",
+    contactName:"",
     dateAdded: new Date().toISOString(),
   };
 };

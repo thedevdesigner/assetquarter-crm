@@ -11,7 +11,10 @@ import {
   Clock, 
   Building2,
   Percent,
-  RefreshCw
+  RefreshCw,
+  PhoneForwarded,
+  UserCheck,
+  CalendarCheck2
 } from "lucide-react";
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid, Cell } from "recharts";
 
@@ -29,9 +32,18 @@ interface FollowUpItem {
   url: string;
   imageUrl: string;
   dateAdded: string; // ISO String
-  status: "pending" | "contacted" | "converted" | "rejected";
+  status: 
+    | "pending" 
+    | "no_answer" 
+    | "callback" 
+    | "sa_pending" 
+    | "sa_allowed" 
+    | "viewing_booked" 
+    | "rejected" 
+    | "not_interested";
   attempts: number;
   notes: string;
+  customerName?: string;
 }
 
 const API_BASE = `${process.env.NEXT_PUBLIC_API_URL}/api/v1/followups`;
@@ -84,27 +96,36 @@ export default function PerformancePage() {
     return itemDateStr === selectedDateStr;
   });
 
-  // Calculate REAL Metrics from FollowUpItem schema
+  // Calculate REAL Metrics from FollowUpItem schema statuses
   const totalTracked = filteredItems.length;
   const pendingCount = filteredItems.filter((i) => i.status === "pending").length;
-  const contactedCount = filteredItems.filter((i) => i.status === "contacted").length;
-  const convertedCount = filteredItems.filter((i) => i.status === "converted").length;
+  const noAnswerCount = filteredItems.filter((i) => i.status === "no_answer").length;
+  const callbackCount = filteredItems.filter((i) => i.status === "callback").length;
+  const saPendingCount = filteredItems.filter((i) => i.status === "sa_pending").length;
+  const saAllowedCount = filteredItems.filter((i) => i.status === "sa_allowed").length;
+  const viewingBookedCount = filteredItems.filter((i) => i.status === "viewing_booked").length;
   const rejectedCount = filteredItems.filter((i) => i.status === "rejected").length;
+  const notInterestedCount = filteredItems.filter((i) => i.status === "not_interested").length;
 
   // Calculate aggregate attempts logged across all listings for the chosen day
   const totalAttempts = filteredItems.reduce((acc, curr) => acc + (Number(curr.attempts) || 0), 0);
 
-  // Calculate Conversion Rate
+  // Calculate Conversion Efficiency (Viewing Booked + SA Allowed as successful conversions)
+  const successfulConversions = viewingBookedCount + saAllowedCount;
   const conversionRate = totalTracked > 0 
-    ? ((convertedCount / totalTracked) * 100).toFixed(1) 
+    ? ((successfulConversions / totalTracked) * 100).toFixed(1) 
     : "0.0";
 
-  // Chart Data reflecting realistic pipeline breakdown
+  // Comprehensive Chart Data reflecting all pipeline stages
   const chartData = [
-    { name: "Pending", count: pendingCount, color: "#f59e0b" },   // Amber
-    { name: "Contacted", count: contactedCount, color: "#3b82f6" }, // Blue
-    { name: "Converted", count: convertedCount, color: "#10b981" }, // Emerald
-    { name: "Rejected", count: rejectedCount, color: "#f43f5e" },   // Rose
+    { name: "Pending", count: pendingCount, color: "#94a3b8" },         // Slate
+    { name: "No Answer", count: noAnswerCount, color: "#71717a" },     // Zinc
+    { name: "Callback", count: callbackCount, color: "#f59e0b" },       // Amber
+    { name: "SA Pending", count: saPendingCount, color: "#3b82f6" },   // Blue
+    { name: "SA Allowed", count: saAllowedCount, color: "#10b981" },   // Emerald
+    { name: "Viewing", count: viewingBookedCount, color: "#6366f1" },  // Indigo
+    { name: "Rejected", count: rejectedCount, color: "#f43f5e" },       // Rose
+    { name: "Not Int.", count: notInterestedCount, color: "#e11d48" }, // Deep Rose
   ];
 
   return (
@@ -150,12 +171,16 @@ export default function PerformancePage() {
       </div>
 
       {/* Metrics Summary Grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
         <MetricCard label="Total Tracked" value={totalTracked} icon={Building2} />
-        <MetricCard label="Pending" value={pendingCount} icon={Clock} color="text-amber-500" />
-        <MetricCard label="Contacted" value={contactedCount} icon={TrendingUp} color="text-blue-500" />
-        <MetricCard label="Converted" value={convertedCount} icon={CheckCircle2} color="text-emerald-500" highlight />
+        <MetricCard label="Pending" value={pendingCount} icon={Clock} color="text-slate-500" />
+        <MetricCard label="No Answer" value={noAnswerCount} icon={PhoneCall} color="text-zinc-500" />
+        <MetricCard label="Callback" value={callbackCount} icon={PhoneForwarded} color="text-amber-500" />
+        <MetricCard label="SA Pending" value={saPendingCount} icon={TrendingUp} color="text-blue-500" />
+        <MetricCard label="SA Allowed" value={saAllowedCount} icon={UserCheck} color="text-emerald-500" highlight />
+        <MetricCard label="Viewing Booked" value={viewingBookedCount} icon={CalendarCheck2} color="text-indigo-500" highlight />
         <MetricCard label="Rejected" value={rejectedCount} icon={XCircle} color="text-rose-500" />
+        <MetricCard label="Not Interested" value={notInterestedCount} icon={XCircle} color="text-rose-600" />
         <MetricCard label="Attempts Made" value={totalAttempts} icon={PhoneCall} />
       </div>
 
@@ -166,12 +191,12 @@ export default function PerformancePage() {
             <Percent className="h-6 w-6" />
           </div>
           <div>
-            <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Conversion Efficiency</h3>
+            <h3 className="text-sm font-semibold text-muted-foreground uppercase tracking-wider">Pipeline Conversion Efficiency</h3>
             <p className="text-2xl font-black text-foreground">{conversionRate}%</p>
           </div>
         </div>
         <p className="text-xs text-muted-foreground text-center sm:text-right max-w-sm">
-          Percentage of property listings added on {format(selectedDate, "PP")} that moved successfully to the <span className="font-semibold text-emerald-600">Converted</span> stage.
+          Percentage of property listings added on {format(selectedDate, "PP")} that successfully reached <span className="font-semibold text-emerald-600">SA Allowed</span> or <span className="font-semibold text-indigo-600">Viewing Booked</span>.
         </p>
       </div>
 
@@ -179,10 +204,10 @@ export default function PerformancePage() {
       <div className="bg-card border rounded-2xl p-6 shadow-sm space-y-6">
         <div>
           <h2 className="text-lg font-bold text-foreground">
-            Pipeline Distribution ({format(selectedDate, "PP")})
+            Pipeline Stage Distribution ({format(selectedDate, "PP")})
           </h2>
           <p className="text-xs text-muted-foreground">
-            Status counts for listings added on the selected day
+            Status counts across all pipeline categories for listings added on the selected day
           </p>
         </div>
 
@@ -190,7 +215,7 @@ export default function PerformancePage() {
           <ResponsiveContainer width="100%" height="100%">
             <BarChart data={chartData} margin={{ top: 10, right: 30, left: 0, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" opacity={0.15} />
-              <XAxis dataKey="name" stroke="#888888" fontSize={12} tickLine={false} axisLine={false} />
+              <XAxis dataKey="name" stroke="#888888" fontSize={11} tickLine={false} axisLine={false} />
               <YAxis stroke="#888888" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
               <Tooltip 
                 contentStyle={{ 
