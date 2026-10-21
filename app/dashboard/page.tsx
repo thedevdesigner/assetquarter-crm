@@ -254,8 +254,11 @@ const fetchGumtreeProperties = async (param: GumtreePayload | number) => {
       const properties = Array.isArray(innerData) ? innerData : innerData.data || [];
       const pagination = result.pagination || innerData.pagination || {};
 
-      const totalPages = Number(pagination.numberOfPages || 1);
-
+      let totalPages = Number(pagination.numberOfPages || 1);
+      // FIX: Ensure totalPages doesn't default to inflated scraper fallback values (e.g. 50 pages for 11 results)
+      if (pageToFetch === 1 && properties.length > 0 && properties.length < 24 && totalPages > 5) {
+        totalPages = 1; // If page 1 has fewer items than a standard page size and totalPages looks artificially bloated, clamp it to 1
+      }
       // Save into cache & persist to localStorage
       if (!gumtreeCacheRef.current[cacheKey]) {
         gumtreeCacheRef.current[cacheKey] = {};
