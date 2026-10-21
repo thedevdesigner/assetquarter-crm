@@ -178,6 +178,7 @@ export default function DashboardPage() {
   };
 
 const fetchGumtreeProperties = async (param: GumtreePayload | number) => {
+    setStatus("loading");
     let pageToFetch = 1;
     let gtPayload: GumtreePayload | null = null;
 
