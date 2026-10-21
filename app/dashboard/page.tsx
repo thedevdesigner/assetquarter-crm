@@ -22,6 +22,7 @@ import { FollowUpItem } from "@/lib/followups";
 import { Button } from "@/components/ui/button";
 import { SourceToggle } from "@/components/explorer/SourceToggle";
 import { RightmoveAutocompletion, RightmovePayload } from "@/components/explorer/RightmoveAutocompletion";
+import { GumtreeAutocompletion, GumtreePayload } from "@/components/explorer/GumtreeAutocompletion";
 
 interface Notification {
   id: number;
@@ -67,8 +68,10 @@ export default function DashboardPage() {
   // ==========================================
   // PERSISTENT STORAGE-BACKED CACHE REFERENCES
   // ==========================================
-  const gumtreeCacheRef = useRef<Record<number, { listings: any[]; numberOfPages: number }>>({});
+  const gumtreeCacheRef = useRef<Record<string, Record<number, { listings: any[]; numberOfPages: number }>>>({});
   const rightmoveCacheRef = useRef<Record<string, Record<number, { listings: any[]; numberOfPages: number }>>>({});
+  
+  const [activeGumtreePayload, setActiveGumtreePayload] = useState<GumtreePayload | null>(null);
   const [activeRmPayload, setActiveRmPayload] = useState<RightmovePayload | null>(null);
 
   // 1. Load persistent cache from localStorage on initial mount
@@ -76,7 +79,11 @@ export default function DashboardPage() {
     try {
       const savedGumtree = localStorage.getItem(GUMTREE_STORAGE_KEY);
       if (savedGumtree) {
-        gumtreeCacheRef.current = JSON.parse(savedGumtree);
+        const parsedGt = JSON.parse(savedGumtree);
+        gumtreeCacheRef.current = parsedGt.cache || {};
+        if (parsedGt.activePayload) {
+          setActiveGumtreePayload(parsedGt.activePayload);
+        }
       }
 
       const savedRightmove = localStorage.getItem(RIGHTMOVE_STORAGE_KEY);
@@ -94,16 +101,11 @@ export default function DashboardPage() {
 
   // 2. Restore view when switching sources/tabs or refreshing
   useEffect(() => {
-    if (source === "gumtree") {
-      if (gumtreeCacheRef.current[currentPage]) {
-        const cached = gumtreeCacheRef.current[currentPage];
-        setListingData(cached.listings);
-        setNumberOfPages(cached.numberOfPages);
-        setStatus(cached.listings.length > 0 ? "success" : "empty");
-      } else if (Object.keys(gumtreeCacheRef.current).length > 0) {
-        const firstPage = Number(Object.keys(gumtreeCacheRef.current)[0]);
-        const cached = gumtreeCacheRef.current[firstPage];
-        setCurrentPage(firstPage);
+    if (source === "gumtree" && activeGumtreePayload) {
+      const cacheKey = `${activeGumtreePayload.locationId || activeGumtreePayload.location}`;
+      const gtCache = gumtreeCacheRef.current[cacheKey];
+      if (gtCache && gtCache[currentPage]) {
+        const cached = gtCache[currentPage];
         setListingData(cached.listings);
         setNumberOfPages(cached.numberOfPages);
         setStatus(cached.listings.length > 0 ? "success" : "empty");
@@ -133,7 +135,7 @@ export default function DashboardPage() {
       setNumberOfPages(1);
       setStatus("idle");
     }
-  }, [source, activeRmPayload]);
+  }, [source, activeGumtreePayload, activeRmPayload]);
 
   const addNotification = (type: "success" | "info" | "error", message: string) => {
     const id = Date.now();
@@ -147,7 +149,7 @@ export default function DashboardPage() {
     if (!listing) return;
 
     const sourceUrl = listing.url || listing.propertyUrl || "";
-    const phoneNum = listing.srpContactDetail?.replyPhone || listing.phone || "";
+    const phoneNum = listing.srpContactDetail?.replyPhone || listing.customer?.contactTelephone || "";
     const contactName = listing.customerName || listing.customer?.name || "";
 
     const newItem: FollowUpItem = {
@@ -175,14 +177,28 @@ export default function DashboardPage() {
     }).catch((err) => console.warn("DB Sync delayed:", err));
   };
 
-  const fetchGumtreeProperties = async (page: number = 1) => {
-    const pageNum = typeof page === "number" ? page : 1;
+const fetchGumtreeProperties = async (param: GumtreePayload | number) => {
+    let pageToFetch = 1;
+    let gtPayload: GumtreePayload | null = null;
+
+    if (typeof param === "number") {
+      pageToFetch = param;
+      gtPayload = activeGumtreePayload;
+    } else {
+      pageToFetch = 1;
+      gtPayload = param;
+      setActiveGumtreePayload(param);
+    }
+
+    if (!gtPayload || !gtPayload.location) return;
+
+    const cacheKey = `${gtPayload.locationId || gtPayload.location}`;
 
     // Check cache first for instant navigation
-    if (gumtreeCacheRef.current[pageNum]) {
-      const cached = gumtreeCacheRef.current[pageNum];
+    if (gumtreeCacheRef.current[cacheKey]?.[pageToFetch]) {
+      const cached = gumtreeCacheRef.current[cacheKey][pageToFetch];
       setListingData(cached.listings);
-      setCurrentPage(pageNum);
+      setCurrentPage(pageToFetch);
       setNumberOfPages(cached.numberOfPages);
       setStatus(cached.listings.length > 0 ? "success" : "empty");
       return;
@@ -193,7 +209,6 @@ export default function DashboardPage() {
       return;
     }
 
-    const isPost = pageNum > 1;
     setStatus("loading");
     startCooldownLock(10);
 
@@ -201,18 +216,29 @@ export default function DashboardPage() {
       const apiUrl = process.env.NEXT_PUBLIC_API_URL;
       const endpoint = `${apiUrl}/api/v1/property/gumtree`;
 
-      const fetchOptions: RequestInit = isPost
-        ? {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ page: pageNum }),
-          }
-        : {
-            method: "GET",
-            headers: { "Content-Type": "application/json" },
-          };
+      let response: Response;
 
-      const response = await fetch(endpoint, fetchOptions);
+      // Page 1 is a GET request with query param; Page 2+ is a POST request with body
+      if (pageToFetch === 1) {
+        const queryParams = new URLSearchParams({
+          query: gtPayload.location,
+          ...(gtPayload.locationId ? { locationId: String(gtPayload.locationId) } : {}),
+        });
+        response = await fetch(`${endpoint}?${queryParams.toString()}`, {
+          method: "GET",
+          headers: { "Content-Type": "application/json" },
+        });
+      } else {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            searchQuery: gtPayload.location,
+            page: pageToFetch,
+          }),
+        });
+      }
+
       if (!response.ok) throw new Error(`Server status ${response.status}`);
 
       const result = await response.json();
@@ -221,24 +247,33 @@ export default function DashboardPage() {
       const pagination = result.pagination || innerData.pagination || {};
 
       const totalPages = Number(pagination.numberOfPages || 1);
-      const activePage = Number(pagination.currentPage || pageNum);
 
-      // Save into ref cache & persist to localStorage
-      gumtreeCacheRef.current[activePage] = {
+      // Save into cache & persist to localStorage
+      if (!gumtreeCacheRef.current[cacheKey]) {
+        gumtreeCacheRef.current[cacheKey] = {};
+      }
+      gumtreeCacheRef.current[cacheKey][pageToFetch] = {
         listings: properties,
         numberOfPages: totalPages,
       };
-      localStorage.setItem(GUMTREE_STORAGE_KEY, JSON.stringify(gumtreeCacheRef.current));
+
+      localStorage.setItem(
+        GUMTREE_STORAGE_KEY,
+        JSON.stringify({
+          cache: gumtreeCacheRef.current,
+          activePayload: gtPayload,
+        })
+      );
 
       setListingData(properties);
-      setCurrentPage(activePage);
+      setCurrentPage(pageToFetch);
       setNumberOfPages(totalPages);
       setStatus(properties.length > 0 ? "success" : "empty");
     } catch (error: any) {
       console.error("Gumtree Fetch Error:", error);
       setStatus("error");
     }
-  };
+};
 
   const fetchRightmoveProperties = async (param: RightmovePayload | number) => {
     let pageToFetch = 1;
@@ -415,42 +450,40 @@ export default function DashboardPage() {
         )}
 
         {source === "gumtree" && (
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-2 border-t">
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <Filter className="h-4 w-4 text-muted-foreground" />
-              <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Filter:</span>
-              <div className="inline-flex rounded-lg border p-1 bg-muted/50">
-                <button
-                  onClick={() => setGumtreeFilter("all")}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                    gumtreeFilter === "all" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  All Listings
-                </button>
-                <button
-                  onClick={() => setGumtreeFilter("with_numbers")}
-                  className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
-                    gumtreeFilter === "with_numbers" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  Listings with Numbers
-                </button>
+          <div className="space-y-4 pt-2 border-t">
+            <GumtreeAutocompletion
+              onFetchListings={(payload) => {
+                setActiveGumtreePayload(payload);
+                fetchGumtreeProperties(payload);
+              }}
+              isLoadingListings={status === "loading"}
+            />
+
+            {/* Gumtree Filter Controls */}
+            <div className="flex items-center justify-between gap-2 pt-2 border-t">
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <Filter className="h-4 w-4 text-muted-foreground" />
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">Filter:</span>
+                <div className="inline-flex rounded-lg border p-1 bg-muted/50">
+                  <button
+                    onClick={() => setGumtreeFilter("all")}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                      gumtreeFilter === "all" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    All Listings
+                  </button>
+                  <button
+                    onClick={() => setGumtreeFilter("with_numbers")}
+                    className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                      gumtreeFilter === "with_numbers" ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+                    }`}
+                  >
+                    Listings with Numbers
+                  </button>
+                </div>
               </div>
             </div>
-
-            <Button 
-              onClick={() => fetchGumtreeProperties(1)} 
-              disabled={status === "loading"}
-              className="px-6 h-11 text-base font-semibold shadow-md w-full sm:w-auto"
-            >
-              {status === "loading" ? (
-                <Loader2 className="h-5 w-5 mr-2 animate-spin" />
-              ) : (
-                <Search className="h-5 w-5 mr-2" />
-              )}
-              Fetch Gumtree Listings
-            </Button>
           </div>
         )}
       </div>
@@ -615,7 +648,7 @@ export default function DashboardPage() {
           </div>
         )}
 
-        {/* Pagination */}
+       {/* Pagination & Jump-to-Page Selector */}
         {numberOfPages > 1 && (
           <div className="flex items-center justify-between pt-4 border-t">
             <Button
@@ -626,9 +659,22 @@ export default function DashboardPage() {
               Previous
             </Button>
             
-            <span className="text-sm font-medium">
-              Page {currentPage} of {numberOfPages}
-            </span>
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium">Page</span>
+              <select
+                value={currentPage}
+                onChange={(e) => handlePageChange(Number(e.target.value))}
+                disabled={status === "loading"}
+                className="px-3 py-1.5 bg-background border rounded-lg text-sm font-medium focus:outline-none focus:ring-2 focus:ring-primary/20 disabled:opacity-50"
+              >
+                {Array.from({ length: numberOfPages }, (_, i) => i + 1).map((pageNum) => (
+                  <option key={pageNum} value={pageNum}>
+                    {pageNum}
+                  </option>
+                ))}
+              </select>
+              <span className="text-sm font-medium text-muted-foreground">of {numberOfPages}</span>
+            </div>
 
             <Button
               disabled={currentPage >= numberOfPages || status === "loading"}
