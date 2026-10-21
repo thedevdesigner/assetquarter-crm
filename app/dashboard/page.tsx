@@ -99,7 +99,7 @@ export default function DashboardPage() {
     }
   }, []);
 
-  // 2. Restore view when switching sources/tabs or refreshing
+// 2. Restore view when switching sources/tabs or refreshing
   useEffect(() => {
     if (source === "gumtree" && activeGumtreePayload) {
       const cacheKey = `${activeGumtreePayload.locationId || activeGumtreePayload.location}`;
@@ -113,7 +113,10 @@ export default function DashboardPage() {
         setListingData([]);
         setCurrentPage(1);
         setNumberOfPages(1);
-        setStatus("idle");
+        // PROTECT LOADING STATE: Do not reset to idle if we are currently loading
+        if (status !== "loading") {
+          setStatus("idle");
+        }
       }
     } else if (source === "rightmove" && activeRmPayload) {
       const cacheKey = `${activeRmPayload.regionId}-${activeRmPayload.sinceAdded || "14"}`;
@@ -127,13 +130,18 @@ export default function DashboardPage() {
         setListingData([]);
         setCurrentPage(1);
         setNumberOfPages(1);
-        setStatus("idle");
+        // PROTECT LOADING STATE: Do not reset to idle if we are currently loading
+        if (status !== "loading") {
+          setStatus("idle");
+        }
       }
     } else {
       setListingData([]);
       setCurrentPage(1);
       setNumberOfPages(1);
-      setStatus("idle");
+      if (status !== "loading") {
+        setStatus("idle");
+      }
     }
   }, [source, activeGumtreePayload, activeRmPayload]);
 
@@ -178,7 +186,6 @@ export default function DashboardPage() {
   };
 
 const fetchGumtreeProperties = async (param: GumtreePayload | number) => {
-    setStatus("loading");
     let pageToFetch = 1;
     let gtPayload: GumtreePayload | null = null;
 
